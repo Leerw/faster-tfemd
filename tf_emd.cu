@@ -77,7 +77,6 @@ __global__ void calc_unass_cnt_sum(int b, int * unass_cnt, int * unass_cnt_sum) 
 	}
 	__syncthreads(); 
 	
-	//printf("%d\n", unass_cnt_sum[b - 1]);
 	unass_cnt_sum[threadIdx.x] = scan_array[threadIdx.x];
 }
 
@@ -239,10 +238,9 @@ int emdMatchLauncher(int b, int n, int m, \
                     int* unass_cnt_sum, \
                     int* cnt_tmp, \
                     int* max_idx, \
-                    float eps,
-                    int iters
+                    const float* cu_eps,
+                    const int* cu_iters
 ) {
-
     if (n != m) {
         printf("Input error! The two point clouds should have the same size!\n");
         return -1;
@@ -260,6 +258,20 @@ int emdMatchLauncher(int b, int n, int m, \
 
 	cudaMemset(assignment, -1, b * n * sizeof(int));
 	cudaMemset(assignment_inv, -1, b * n * sizeof(int));
+	cudaMemset(price, 0, b * m * sizeof(float));
+	cudaMemset(bid, 0, b * n * sizeof(int));
+	cudaMemset(bid_increments, 0, b * n * sizeof(float));
+	cudaMemset(max_increments, 0, b * m * sizeof(float));
+	cudaMemset(unass_idx, 0, b * n * sizeof(int));
+	cudaMemset(max_idx, 0, b * m * sizeof(int));
+	cudaMemset(unass_cnt, 0, 512 * sizeof(int));
+	cudaMemset(unass_cnt_sum, 0, 512 * sizeof(int));
+	cudaMemset(cnt_tmp, 0, 512 * sizeof(int));
+
+	int eps;
+	int iters;
+	cudaMemcpy(&eps, cu_eps, sizeof(int), cudaMemcpyDeviceToHost);
+	cudaMemcpy(&iters, cu_iters, sizeof(float), cudaMemcpyDeviceToHost);
 
     for (int i = 0; i < iters; i++) {
 		clear<<<1, b>>>(b, cnt_tmp, unass_cnt);
@@ -294,7 +306,7 @@ int emdCostLauncher(int b, int n, const float* xyz1, const float* xyz2, float* d
 	return 1;
 }
 
-__global__ void emdcostGrad(int b, int n, int m, const float* xyz1, const float* xyz2, const int* assignment, float* grad_xyz) {    
+__global__ void emdcostGrad(int b, int n, int m, const float* xyz1, const float* xyz2, const float* grad_dist, const int* assignment, float* grad_xyz1, float* grad_xyz2) {
 	for (int i = blockIdx.x; i < b; i += gridDim.x) {
 		for (int j = threadIdx.x + blockIdx.y * blockDim.x; j < n; j += blockDim.x * gridDim.y) {
 			float x1 = xyz1[(i * n + j) * 3 + 0];
@@ -304,13 +316,20 @@ __global__ void emdcostGrad(int b, int n, int m, const float* xyz1, const float*
 			float x2 = xyz2[(i * n + j2) * 3 + 0];
 			float y2 = xyz2[(i * n + j2) * 3 + 1];
 			float z2 = xyz2[(i * n + j2) * 3 + 2];
-			atomicAdd(&(grad_xyz[(i * n + j) * 3 + 0]), x1 - x2);
-			atomicAdd(&(grad_xyz[(i * n + j) * 3 + 1]), y1 - y2);
-			atomicAdd(&(grad_xyz[(i * n + j) * 3 + 2]), z1 - z2);
+			float g = grad_dist[i * n + j] * 2;
+			atomicAdd(&(grad_xyz1[(i * n + j) * 3 + 0]), g * (x1 - x2));
+			atomicAdd(&(grad_xyz1[(i * n + j) * 3 + 1]), g * (y1 - y2));
+			atomicAdd(&(grad_xyz1[(i * n + j) * 3 + 2]), g * (z1 - z2));
+
+			atomicAdd(&(grad_xyz2[(i * n + j2) * 3 + 0]), -g * (x1 - x2));
+			atomicAdd(&(grad_xyz2[(i * n + j2) * 3 + 1]), -g * (y1 - y2));
+			atomicAdd(&(grad_xyz2[(i * n + j2) * 3 + 2]), -g * (z1 - z2));
 		}
 	}
 }
 
-void emdcostGradLauncher(int b, int n, int m, const float* xyz1, const float* xyz2, const int* assignment, float* grad_xyz) {	
-	emdcostGrad<<<dim3(b, n / 1024, 1), 1024>>>(b, n, m, xyz1, xyz2, assignment, grad_xyz);
+void emdcostGradLauncher(int b, int n, int m, const float* xyz1, const float* xyz2, const float* grad_cost, const int* assignment, float* grad_xyz1, float* grad_xyz2) {	
+	cudaMemset(grad_xyz1, 0, b * n * 3 * sizeof(float));
+	cudaMemset(grad_xyz2, 0, b * n * 3 * sizeof(float));
+	emdcostGrad<<<dim3(b, n / 1024, 1), 1024>>>(b, n, m, xyz1, xyz2, grad_cost, assignment, grad_xyz1, grad_xyz2);
 }
