@@ -10,6 +10,8 @@ using namespace tensorflow;
 REGISTER_OP("EmdMatch")
     .Input("xyz1: float32")
     .Input("xyz2: float32")
+    .Input("eps: float32")
+    .Input("iters: int32")
     .Output("assignment: int32");
 
 REGISTER_OP("EmdCost")
@@ -21,8 +23,10 @@ REGISTER_OP("EmdCost")
 REGISTER_OP("EmdCostGrad")
     .Input("xyz1: float32")
     .Input("xyz2: float32")
+    .Input("grad_cost: float32")
     .Input("assignment: int32")
-    .Output("grad_xyz: float32");
+    .Output("grad_xyz1: float32")
+    .Output("grad_xyz2: float32");
 
 int emdMatchLauncher(int b, int n, int m, \
                     const float* xyz1, \
@@ -38,13 +42,13 @@ int emdMatchLauncher(int b, int n, int m, \
                     int* unass_cnt_sum, \
                     int* cnt_tmp, \
                     int* max_idx, \
-                    float eps,
-                    int iters
+                    const float* eps,
+                    const int* iters
 );
 
 int emdCostLauncher(int b, int n, const float* xyz1, const float* xyz2, float* dist, const int* assignment);
 
-void emdcostGradLauncher(int b, int n, int m, const float* xyz1, const float* xyz2, const int* assignment, float* grad_xyz);
+void emdcostGradLauncher(int b, int n, int m, const float* xyz1, const float* xyz2, const float* grad_cost, const int* assignment, float* grad_xyz1, float* grad_xyz2);
 
 
 class EmdMatchOp: public OpKernel {
@@ -60,6 +64,16 @@ class EmdMatchOp: public OpKernel {
             OP_REQUIRES(context, xyz2_tensor.dims() == 3 && xyz2_tensor.shape().dim_size(2) == 3, errors::InvalidArgument("EmdMatch expects (batch_size, num_point, 3) xyz2 shape"));
             auto xyz2_flat = xyz2_tensor.flat<float>();
             const float* xyz2 = &(xyz2_flat(0));
+
+            const Tensor& eps_tensor = context->input(2);
+            OP_REQUIRES(context, eps_tensor.dims() == 1, errors::InvalidArgument("EmdMatch expects constant eps"));
+            auto eps_flat = eps_tensor.flat<float>();
+            const float* eps = &(eps_flat(0));
+
+            const Tensor& iters_tensor = context->input(3);
+            OP_REQUIRES(context, iters_tensor.dims() == 1, errors::InvalidArgument("EmdMatch expects constant iters"));
+            auto iters_flat = iters_tensor.flat<int>();
+            const int* iters = &(iters_flat(0));
             
             int b = xyz1_tensor.shape().dim_size(0);
             int n = xyz1_tensor.shape().dim_size(1);
@@ -119,7 +133,7 @@ class EmdMatchOp: public OpKernel {
 
             int* assignment = &(assignment_flat(0));
 
-            emdMatchLauncher(b, n, m, xyz1, xyz2, assignment, price, assignment_inv, bid, bid_increments, max_increments, unass_idx, unass_cnt, unass_cnt_sum, cnt_tmp, max_idx, 0.005, 50);
+            emdMatchLauncher(b, n, m, xyz1, xyz2, assignment, price, assignment_inv, bid, bid_increments, max_increments, unass_idx, unass_cnt, unass_cnt_sum, cnt_tmp, max_idx, eps, iters);
         }
 };
 
@@ -173,22 +187,32 @@ class EmdCostGradOp : public OpKernel {
             OP_REQUIRES(context, xyz2_tensor.dims() == 3 && xyz2_tensor.shape().dim_size(2) == 3, errors::InvalidArgument("EmdMatchGrad expects (batch_size, num_point, 3) xyz2 shape"));
             auto xyz2_flat = xyz2_tensor.flat<float>();
             const float* xyz2 = &(xyz2_flat(0));
-            
+
             int b = xyz1_tensor.shape().dim_size(0);
             int n = xyz1_tensor.shape().dim_size(1);
             int m = xyz2_tensor.shape().dim_size(1);
+
+            const Tensor& grad_cost_tensor = context->input(2);
+            OP_REQUIRES(context, grad_cost_tensor.shape() == TensorShape({b, n}), errors::InvalidArgument("EmdMatchGrad expects (batch_size, num_point) grad_cost shape"));
+            auto grad_cost_flat = grad_cost_tensor.flat<float>();
+            const float* grad_cost = &(grad_cost_flat(0));
             
-            const Tensor& assignment_tensor = context->input(2);
+            const Tensor& assignment_tensor = context->input(3);
             OP_REQUIRES(context, assignment_tensor.shape()==TensorShape({b, n}), errors::InvalidArgument("EmdMatchGrad expects (batchsize, n, m) assignment shape"));
             auto assignment_flat = assignment_tensor.flat<int>();
             const int* assignment = &(assignment_flat(0));
 
-            Tensor* grad_xyz_tensor = NULL;
-            OP_REQUIRES_OK(context, context->allocate_output(0, TensorShape{b, n, 3}, &grad_xyz_tensor));
-            auto grad_xyz_flat = grad_xyz_tensor->flat<float>();
-            float* grad_xyz = &(grad_xyz_flat(0));
+            Tensor* grad_xyz1_tensor = NULL;
+            OP_REQUIRES_OK(context, context->allocate_output(0, TensorShape{b, n, 3}, &grad_xyz1_tensor));
+            auto grad_xyz1_flat = grad_xyz1_tensor->flat<float>();
+            float* grad_xyz1 = &(grad_xyz1_flat(0));
 
-            emdcostGradLauncher(b, n, m, xyz1, xyz2, assignment, grad_xyz);
+            Tensor* grad_xyz2_tensor = NULL;
+            OP_REQUIRES_OK(context, context->allocate_output(1, TensorShape{b, m, 3}, &grad_xyz2_tensor));
+            auto grad_xyz2_flat = grad_xyz2_tensor->flat<float>();
+            float* grad_xyz2 = &(grad_xyz2_flat(0));
+
+            emdcostGradLauncher(b, n, m, xyz1, xyz2, grad_cost, assignment, grad_xyz1, grad_xyz2);
         }
 };
 REGISTER_KERNEL_BUILDER(Name("EmdCostGrad").Device(DEVICE_GPU), EmdCostGradOp);
